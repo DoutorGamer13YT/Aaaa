@@ -13,14 +13,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Baixar repositório
+        uses: actions/checkout@v4
 
-      - name: Localizar e extrair o projeto
+      - name: Extrair e localizar projeto Android
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          if [ -f project.zip ]; then
+          if [ -f project-modificado.zip ]; then
+            mkdir -p src_proj
+            unzip -oq project-modificado.zip -d src_proj
+            ROOT="src_proj"
+          elif [ -f project.zip ]; then
             mkdir -p src_proj
             unzip -oq project.zip -d src_proj
             ROOT="src_proj"
@@ -28,70 +33,91 @@ jobs:
             ROOT="."
           fi
 
-          SETTINGS=$(find "$ROOT" -type f \
+          echo "Procurando arquivos Gradle..."
+
+          SETTINGS=$(find "$ROOT" \
+            -type f \
             \( -name settings.gradle -o -name settings.gradle.kts \) \
-            -not -path '*/.gradle/*' | head -n 1)
+            -not -path '*/.gradle/*' \
+            -print -quit)
 
           if [ -z "$SETTINGS" ]; then
-            echo "ERRO: não encontrei settings.gradle nem settings.gradle.kts."
-            echo "Arquivos encontrados:"
-            find "$ROOT" -maxdepth 4 -type f | head -n 100
+            echo "::error::Não encontrei settings.gradle nem settings.gradle.kts."
+            echo "Arquivos disponíveis:"
+            find "$ROOT" -maxdepth 5 -type f \
+              -not -path '*/.gradle/*' | head -n 150
             exit 1
           fi
 
-          SRC=$(dirname "$SETTINGS")
-          echo "SRC=$SRC" >> "$GITHUB_ENV"
+          SRC="$(dirname "$SETTINGS")"
 
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
           echo "Projeto encontrado em: $SRC"
           ls -la "$SRC"
 
-          if [ ! -f "$SRC/build.gradle" ] &&
+          if [ ! -f "$SRC/gradlew" ] &&
+             [ ! -f "$SRC/build.gradle" ] &&
              [ ! -f "$SRC/build.gradle.kts" ]; then
-            echo "AVISO: build.gradle não encontrado na raiz do projeto."
+            echo "::error::A pasta encontrada não parece ser a raiz completa do projeto Gradle."
+            exit 1
           fi
 
-      - uses: actions/setup-java@v4
+      - name: Configurar Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.14.3"
 
-      - name: Compilar
+      - name: Compilar APK de depuração
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           cd "$SRC"
-          gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Localizar APK
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Localizar e preparar APK
         shell: bash
         run: |
-          set -e
-          APK=$(find "$SRC" -type f \
-            -path '*/build/outputs/apk/debug/*.apk' | head -n 1)
+          set -euo pipefail
+
+          APK=$(find "$SRC" \
+            -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERRO: a compilação terminou sem gerar um APK de depuração."
+            echo "::error::A compilação não gerou um APK de depuração."
             exit 1
           fi
 
           cp "$APK" ios-banners-debug.apk
           ls -lh ios-banners-debug.apk
 
-      - uses: actions/upload-artifact@v4
+      - name: Disponibilizar APK para download
+        uses: actions/upload-artifact@v4
         with:
           name: ios-banners-debug-apk
           path: ios-banners-debug.apk
+          if-no-files-found: error
 
-      - name: Publicar em Releases
+      - name: Publicar APK em Releases
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           gh release create "debug-${{ github.run_number }}" \
             ios-banners-debug.apk \
             --title "APK de depuração #${{ github.run_number }}" \
-            --notes "APK de depuração. Compilado na nuvem; não testado em aparelho." \
+            --notes "APK de depuração compilado pelo GitHub Actions. Não testado em aparelho." \
             --latest
